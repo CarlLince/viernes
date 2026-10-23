@@ -1,0 +1,11 @@
+.env
+notas.txt
+*.wav
+*.mp3
+*.m4a
+*.log
+.aider*
+__pycache__/
+venv/
+viernes_anterior.py
+viernes_antes_de_voz.py
