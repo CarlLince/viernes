@@ -24,6 +24,7 @@ Termux:API...). Puedes añadirle notas propias en notas.txt, junto a este archiv
 """
 
 import argparse
+import atexit
 import json
 import os
 import re
@@ -97,6 +98,16 @@ ULTIMO_MODELO = None  # último modelo que respondió con éxito
 RUTA_M4A = "input.m4a"
 RUTA_WAV = "input.wav"
 RUTA_MP3 = "respuesta.mp3"
+
+
+def _borrar_audios():
+    """Borra los audios temporales al salir."""
+    for ruta in (RUTA_M4A, RUTA_WAV, RUTA_MP3):
+        if os.path.exists(ruta):
+            os.remove(ruta)
+
+
+atexit.register(_borrar_audios)
 
 PROMPT_SISTEMA = """
 Eres VIERNES, un asistente de voz y agente de terminal eficiente, educado y conciso. Llama «jefe» al usuario.
