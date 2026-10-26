@@ -39,6 +39,8 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
+import cara
+
 # ---------------------------------------------------------------------------
 # Configuración (ajusta a tu gusto)
 # ---------------------------------------------------------------------------
@@ -486,6 +488,7 @@ def descripcion_voz():
 
 def hablar(texto):
     print(f"VIERNES: {texto}")
+    cara.estado("hablando", texto)
     if MUDO:
         return
     texto_voz = limpiar_texto(texto).lstrip("-").strip()
@@ -504,6 +507,7 @@ def hablar(texto):
 
 def grabar_audio(segundos):
     """Graba con termux-api y convierte a WAV (16 kHz, mono). True si todo salió bien."""
+    cara.estado("escuchando")
     for ruta in (RUTA_M4A, RUTA_WAV):
         if os.path.exists(ruta):
             os.remove(ruta)
@@ -569,6 +573,7 @@ def escuchar_voz(segundos):
 
 def escuchar():
     """Devuelve la siguiente orden: por voz, o por teclado si falla o con --texto."""
+    cara.estado("escuchando")
     try:
         if MODO_TEXTO:
             return input("Tú: ").strip() or None
@@ -720,6 +725,7 @@ def candidatos():
 
 def consultar_con_respaldo(api_key, historial):
     """Llama a Gemini; si el modelo está saturado o sin cupo, avisa y prueba con el siguiente."""
+    cara.estado("pensando")
     global ULTIMO_MODELO
     lista = candidatos()
     ultimo_error = None
@@ -819,6 +825,7 @@ def procesar_orden(api_key, historial, orden):
 
         if not llamadas:
             hablar(texto or "Listo.")
+            cara.estado("reposo")
             return
         if texto:
             print(f"(modelo) {texto}")
@@ -837,6 +844,7 @@ def procesar_orden(api_key, historial, orden):
         historial.append({"role": "user", "parts": respuestas})
 
     hablar("Me detuve: llegué al máximo de pasos para esta orden.")
+    cara.estado("reposo")
 
 
 # ---------------------------------------------------------------------------
@@ -907,6 +915,7 @@ def main():
             'Configúrala con: export GEMINI_API_KEY="tu_clave"'
         )
 
+    cara.iniciar()
     historial = []
     print(f"VIERNES iniciado (modelos: {' -> '.join(MODELOS)}; voz: {descripcion_voz()})...")
     try:
@@ -926,6 +935,7 @@ def main():
                 continue
             recortar_historial(historial)
             procesar_orden(api_key, historial, orden)
+            cara.estado("reposo")
     except KeyboardInterrupt:
         print("\nVIERNES detenido.")
 
