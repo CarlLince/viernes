@@ -42,6 +42,7 @@ from datetime import datetime
 import cara
 import notas
 import seguridad
+import vad
 
 # ---------------------------------------------------------------------------
 # Configuración (ajusta a tu gusto)
@@ -526,6 +527,19 @@ def hablar(texto):
     print("[Aviso] No pude reproducir la voz.")
 
 
+def convertir_audio_wav():
+    """Convierte RUTA_M4A a RUTA_WAV (16 kHz, mono). True si se convirtió bien."""
+    conversion = ejecutar_externo(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", RUTA_M4A,
+         "-ar", "16000", "-ac", "1", RUTA_WAV],
+        timeout=30,
+    )
+    if conversion is None or conversion.returncode != 0 or not os.path.exists(RUTA_WAV):
+        print("[Aviso] ffmpeg no pudo convertir el audio a WAV.")
+        return False
+    return True
+
+
 def grabar_audio(segundos):
     """Graba con termux-api y convierte a WAV (16 kHz, mono). True si todo salió bien."""
     cara.estado("escuchando")
@@ -551,15 +565,7 @@ def grabar_audio(segundos):
         )
         return False
 
-    conversion = ejecutar_externo(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", RUTA_M4A,
-         "-ar", "16000", "-ac", "1", RUTA_WAV],
-        timeout=30,
-    )
-    if conversion is None or conversion.returncode != 0 or not os.path.exists(RUTA_WAV):
-        print("[Aviso] ffmpeg no pudo convertir el audio a WAV.")
-        return False
-    return True
+    return convertir_audio_wav()
 
 
 def transcribir():
@@ -589,6 +595,16 @@ def transcribir():
 
 
 def escuchar_voz(segundos):
+    try:
+        r = vad.grabar_hasta_silencio(RUTA_M4A, maximo=15)
+    except Exception:
+        r = None
+
+    if r is not None:
+        if not r.get("voz"):
+            return None
+        return transcribir() if convertir_audio_wav() else None
+
     return transcribir() if grabar_audio(segundos) else None
 
 
