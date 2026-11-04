@@ -596,7 +596,7 @@ def transcribir():
 
 def escuchar_voz(segundos):
     try:
-        r = vad.grabar_hasta_silencio(RUTA_M4A, maximo=15)
+        r = vad.grabar_hasta_silencio(RUTA_M4A, maximo=30)
     except Exception:
         r = None
 

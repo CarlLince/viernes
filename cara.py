@@ -3,6 +3,7 @@
 En viernes.py:
     import cara
     cara.iniciar()                      # una vez, al arrancar
+    cara.iniciar(burbuja=True)          # o así: muestra también la burbuja flotante
     cara.estado("escuchando")           # también: "pensando", "hablando", "reposo"
     cara.estado("hablando", respuesta)  # el segundo dato es el texto que se muestra
 
@@ -58,11 +59,12 @@ class _Servidor(ThreadingHTTPServer):
         pass
 
 
-def iniciar(puerto=PUERTO, red=False, abrir=False):
+def iniciar(puerto=PUERTO, red=False, abrir=False, burbuja=False):
     """Levanta la cara en segundo plano.
 
     red=True  -> también se puede ver desde otro celular en la misma Wi-Fi.
     abrir=True -> abre el navegador solo (necesita Termux:API).
+    burbuja=True -> muestra la burbuja flotante de la app Viernes Escucha (necesita Termux:API).
     """
     try:
         servidor = _Servidor(("0.0.0.0" if red else "127.0.0.1", puerto), _Manejador)
@@ -73,6 +75,15 @@ def iniciar(puerto=PUERTO, red=False, abrir=False):
         try:
             subprocess.Popen(
                 ["termux-open-url", "http://localhost:%d" % puerto],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
+    if burbuja:
+        try:
+            subprocess.Popen(
+                ["termux-open-url", "viernes://cara"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -93,6 +104,7 @@ canvas{position:fixed;left:0;top:0;width:100%;height:100%}
 #pie{position:fixed;left:0;right:0;bottom:8%;text-align:center;padding:0 8%}
 #est{font-size:20px;letter-spacing:.15em;text-transform:uppercase}
 #txt{margin-top:10px;font-size:15px;opacity:.7;line-height:1.4;max-height:6.5em;overflow:hidden}
+body.m #nom,body.m #pie{display:none}
 </style></head><body>
 <canvas id="c"></canvas>
 <div id="nom">VIERNES</div>
@@ -107,7 +119,9 @@ const PAL={reposo:[200,.35,.15],escuchando:[150,.75,.45],pensando:[35,.85,1.6],h
 const ETQ={reposo:'En espera',escuchando:'Escuchando…',pensando:'Pensando…',hablando:'Hablando…',offline:'Sin conexión'};
 const peso={reposo:1,escuchando:0,pensando:0,hablando:0,offline:0};
 const act=PAL.reposo.slice();
-let est='reposo',amp=0,fase=0,tPrev=0,tono=200;
+let est='reposo',amp=0,fase=0,tPrev=0,tono=200,ult=0;
+const mini=location.search.indexOf('mini')>=0;
+if(mini)document.body.className='m';
 const mez=(a,b,k)=>a+(b-a)*k;
 const col=a=>'hsla('+tono+',100%,60%,'+a+')';
 elE.textContent=ETQ.reposo;
@@ -117,6 +131,9 @@ function anillo(cx,cy,r,n,hueco,ang,ancho,a){
   for(let i=0;i<n;i++){x.beginPath();x.arc(cx,cy,r,ang+i*paso,ang+i*paso+paso*(1-hueco));x.stroke();}
 }
 function dibujar(ms){
+  requestAnimationFrame(dibujar);
+  if((est==='reposo'||est==='offline')&&ms-ult<33)return;
+  ult=ms;
   const t=ms/1000,dt=Math.min(.05,t-tPrev);tPrev=t;
   const o=PAL[est];
   for(let i=0;i<3;i++)act[i]=mez(act[i],o[i],.06);
@@ -126,7 +143,7 @@ function dibujar(ms){
   fase+=dt*act[2];
   tono=act[0];const v=act[1];
   x.clearRect(0,0,W,H);
-  const cx=W/2,cy=H*.42,R=S*.2;
+  const cx=W/2,cy=H*(mini?.5:.42),R=S*(mini?.3:.2);
   const g=x.createRadialGradient(cx,cy,R*.1,cx,cy,R*(1.9+amp*.6));
   g.addColorStop(0,col(.5*v+.25*amp));g.addColorStop(.5,col(.12*v));g.addColorStop(1,col(0));
   x.fillStyle=g;x.fillRect(0,0,W,H);
@@ -138,14 +155,13 @@ function dibujar(ms){
   if(peso.escuchando>.01)for(let j=0;j<3;j++){const p=(t*.6+j/3)%1;x.lineWidth=S*.004;x.strokeStyle=col((1-p)*.6*peso.escuchando);x.beginPath();x.arc(cx,cy,R*(1.1+p*.9),0,Math.PI*2);x.stroke();}
   if(peso.pensando>.01)for(let j=0;j<3;j++){const a=t*3.2+j*2.094,r=R*1.28;x.beginPath();x.arc(cx+Math.cos(a)*r,cy+Math.sin(a)*r,S*.013,0,Math.PI*2);x.fillStyle=col(.9*peso.pensando);x.fill();}
   if(peso.hablando>.01){x.lineWidth=S*.007;x.lineCap='round';x.strokeStyle=col(.9*peso.hablando);const n=48;for(let i=0;i<n;i++){const a=i/n*Math.PI*2,l=R*.28*(.15+Math.abs(Math.sin(i*1.7+t*8)*Math.sin(i*.9-t*5.3)))*peso.hablando,r0=R*1.2;x.beginPath();x.moveTo(cx+Math.cos(a)*r0,cy+Math.sin(a)*r0);x.lineTo(cx+Math.cos(a)*(r0+l),cy+Math.sin(a)*(r0+l));x.stroke();}x.lineCap='butt';}
-  requestAnimationFrame(dibujar);
 }
 requestAnimationFrame(dibujar);
 async function sondear(){
   try{const r=await fetch('/estado',{cache:'no-store'});const j=await r.json();est=PAL[j.estado]?j.estado:'reposo';elE.textContent=ETQ[est];elT.textContent=j.texto||'';}
   catch(e){est='offline';elE.textContent=ETQ.offline;elT.textContent='';}
 }
-setInterval(sondear,300);sondear();
+setInterval(()=>{if(!document.hidden)sondear();},300);sondear();
 let wl=null;
 addEventListener('click',async()=>{
   try{if(!document.fullscreenElement)await document.documentElement.requestFullscreen();else await document.exitFullscreen();}catch(e){}
