@@ -23,6 +23,21 @@ pkg install -y python python-pip git curl termux-api clang make libffi openssl
 # 2) Descargar (o actualizar) Viernes: viernes.py, cara.py, seguridad.py, pantalla.py, vad.py, notas.py...
 if [ -d "$DIR/.git" ]; then
   git -C "$DIR" pull --ff-only || echo "AVISO: no pude actualizar Viernes (¿cambios locales?). Sigo con lo que ya tienes."
+elif [ -d "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
+  # Ya había una carpeta con archivos sueltos (bajados a mano): se aparta, se baja Viernes y se regresa lo que no sea de Viernes.
+  RESPALDO="$HOME/viernes_respaldo_$(date +%Y%m%d-%H%M%S)"
+  mv "$DIR" "$RESPALDO"
+  if ! git clone "$REPO" "$DIR"; then
+    rm -rf "$DIR"
+    mv "$RESPALDO" "$DIR"
+    echo "No pude bajar Viernes (¿hay internet?). Dejé tu carpeta como estaba."
+    exit 1
+  fi
+  for f in "$RESPALDO"/* "$RESPALDO"/.[!.]*; do
+    [ -e "$f" ] || continue
+    [ -e "$DIR/$(basename "$f")" ] || mv "$f" "$DIR"/
+  done
+  echo "Tu carpeta anterior quedó en $RESPALDO (lo que no era de Viernes, como modelos o notas, volvió a $DIR)."
 else
   git clone "$REPO" "$DIR"
 fi

@@ -32,7 +32,7 @@ MIT
 ## Instalación rápida (Termux)
 
 ```
-pkg install -y git curl && git clone https://github.com/CarlLince/viernes.git ~/viernes && bash ~/viernes/instalar.sh
+pkg install -y curl && curl -fsSL https://raw.githubusercontent.com/CarlLince/viernes/main/instalar.sh | bash
 ```
 
 El instalador pone los paquetes, baja Viernes, te pide tu clave de Gemini, crea el comando `viernes`, ajusta Termux y descarga la app **Viernes Escucha** (aplausos, palabra «viernes», cara flotante y control de pantalla).
