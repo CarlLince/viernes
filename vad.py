@@ -282,7 +282,160 @@ def _iniciar_grabacion(vivo, enc, maximo):
     return None
 
 
+# ---------------------------------------------------------------------------------------------
+# Oír por la app Viernes Escucha. Sirve en teléfonos donde la grabadora de Termux:API no deja oír
+# en vivo (por ejemplo MIUI): la app abre el micrófono y manda el audio crudo por 127.0.0.1:47632.
+# Se usa solo si falta vad_formato.txt (o si pones VIERNES_MIC=app); con VIERNES_MIC=termux se evita.
+# ---------------------------------------------------------------------------------------------
+import json
+import socket
+
+PUERTO_APP = int(os.environ.get("VIERNES_MIC_PUERTO", "47632"))
+CLAVE_APP = os.path.expanduser("~/.viernes/pantalla_token")
+ANTES_VOZ = 15            # cuadros (0.3 s) que se conservan antes de que empieces a hablar
+DESPUES_VOZ = 15          # cuadros (0.3 s) que se conservan después de tu última palabra
+
+
+def _usar_app():
+    elegido = os.environ.get("VIERNES_MIC", "").strip().lower()
+    if elegido in ("app", "termux"):
+        return elegido == "app"
+    return not os.path.exists(CONFIG)
+
+
+def _rms_cuadro(cuadro):
+    muestras = array("h")
+    muestras.frombytes(cuadro)
+    if sys.byteorder == "big":
+        muestras.byteswap()
+    return math.sqrt(sum(m * m for m in muestras) / len(muestras)) if muestras else 0.0
+
+
+def _guardar_pcm(pcm, destino):
+    """Deja el audio en `destino` (m4a), como la grabación normal."""
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "s16le", "-ar", str(RATE), "-ac", "1", "-i", "-",
+             "-c:a", "aac", "-b:a", "48k", destino],
+            input=bytes(pcm), capture_output=True, timeout=30)
+        return r.returncode == 0 and os.path.exists(destino)
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _grabar_con_app(ruta, maximo):
+    """Oye por la app hasta que dejes de hablar. Devuelve lo mismo que grabar_hasta_silencio, o None."""
+    if not _usar_app():
+        return None
+    try:
+        with open(CLAVE_APP, encoding="utf-8") as f:
+            clave = f.read().strip()
+    except OSError:
+        return None
+    t0 = time.time()
+    try:
+        s = socket.create_connection(("127.0.0.1", PUERTO_APP), timeout=1.5)
+    except OSError:
+        return None
+    cuadro_bytes = MUESTRAS * 2
+    pcm = bytearray()
+    ruido = umbral = None
+    arranca = ultima = primero = razon = None
+    pico = visto = 0.0
+    n = 0
+    try:
+        s.sendall((json.dumps({"t": clave, "c": "mic"}) + "\n").encode("utf-8"))
+        s.settimeout(3.0)
+        saludo = b""
+        while len(saludo) < 4:
+            trozo = s.recv(4 - len(saludo))
+            if not trozo:
+                return None
+            saludo += trozo
+        if saludo != b"VMIC":
+            return None
+        pendiente = b""
+        ruidos = []
+        seguidos = 0
+        while razon is None:
+            try:
+                trozo = s.recv(4096)
+            except OSError:
+                trozo = b""
+            if not trozo:
+                razon = "corte"
+                break
+            if primero is None:
+                primero = time.time() - t0
+            pendiente += trozo
+            while razon is None and len(pendiente) >= cuadro_bytes:
+                cuadro, pendiente = pendiente[:cuadro_bytes], pendiente[cuadro_bytes:]
+                pcm += cuadro
+                n += 1
+                nivel = _rms_cuadro(cuadro)
+                visto = max(visto, nivel)
+                if n <= CALIBRACION:
+                    ruidos.append(nivel)
+                    if n == CALIBRACION:
+                        ruido = min(sum(ruidos) / len(ruidos), RUIDO_MAX)
+                        umbral = max(UMBRAL_MIN, ruido * FACTOR_RUIDO)
+                    continue
+                if n == CALIBRACION + 25 and visto == 0.0:
+                    return None                      # el micrófono de la app llegó mudo: se usa el de siempre
+                if nivel > umbral:
+                    pico = max(pico, nivel)
+                    seguidos += 1
+                    if arranca is None and seguidos * PASO >= INICIO_VOZ:
+                        arranca = n - seguidos
+                    if arranca is not None:
+                        ultima = n
+                else:
+                    seguidos = 0
+                if arranca is None:
+                    if (n - CALIBRACION) * PASO >= ESPERA_INICIO:
+                        razon = "sin_voz"
+                elif (n - ultima) * PASO >= FIN_SILENCIO:
+                    razon = "silencio"
+                if razon is None and n * PASO >= maximo:
+                    razon = "maximo"
+    except OSError:
+        return None
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+    if n == 0 or (razon == "corte" and arranca is None):
+        return None
+    t1 = time.time()
+    voz = arranca is not None
+    if voz:
+        ini = max(0, arranca - ANTES_VOZ) * cuadro_bytes
+        fin = len(pcm) if razon in ("maximo", "corte") else min(n, ultima + DESPUES_VOZ) * cuadro_bytes
+        recorte = pcm[ini:fin]
+        if not _guardar_pcm(recorte, ruta):
+            return None
+        segundos = len(recorte) / 2 / RATE
+    else:
+        segundos = max(0, n - CALIBRACION) * PASO
+    return {
+        "voz": voz, "segundos": round(segundos, 2), "razon": razon,
+        "ruido": int(ruido or 0), "umbral": int(umbral or 0), "pico": int(pico),
+        "arranque": round(primero or 0.0, 2),
+        "habla_de": round((arranca or 0) * PASO, 2), "habla_hasta": round((ultima or 0) * PASO, 2),
+        "cierre": round(time.time() - t1, 2),
+    }
+
+
 def grabar_hasta_silencio(ruta, maximo=15.0):
+    """Oye hasta que dejes de hablar: por la app Viernes Escucha si hace falta, si no por Termux:API."""
+    r = _grabar_con_app(ruta, maximo)
+    if r is not None:
+        return r
+    return _grabar_hasta_silencio_termux(ruta, maximo)
+
+
+def _grabar_hasta_silencio_termux(ruta, maximo=15.0):
     """Graba hasta que dejes de hablar. Ver el principio del archivo para los resultados."""
     t_ini = time.time()
     formato = _formato_elegido()

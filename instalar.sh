@@ -18,7 +18,7 @@ echo "== Instalando Viernes =="
 # 1) Paquetes base
 export DEBIAN_FRONTEND=noninteractive
 pkg update -y && pkg upgrade -y
-pkg install -y python python-pip git curl termux-api clang make libffi openssl
+pkg install -y python python-pip git curl termux-api clang make libffi openssl flac
 
 # 2) Descargar (o actualizar) Viernes: viernes.py, cara.py, seguridad.py, pantalla.py, vad.py, notas.py...
 if [ -d "$DIR/.git" ]; then
