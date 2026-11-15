@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 PUERTO = int(os.environ.get("VIERNES_PANTALLA_PUERTO", "47631"))
 ARCHIVO_CLAVE = os.path.expanduser("~/.viernes/pantalla_token")
@@ -26,6 +26,11 @@ _BLOQUEOS_MODELO = {}
 _PEDIR_LOCK = threading.Lock()
 _HISTORIAL_GROQ = []
 _GROQ_LOCK = threading.Lock()
+_GEMINI_RR_INDEX = 0
+
+
+def _obtener_gemini_key():
+    return os.getenv("VIERNES_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 
 def _groq_permitido():
@@ -209,9 +214,17 @@ def cargar_config_minecraft():
             "boton_inv": [2150, 80],
             "cerrar_inv": [2200, 60],
             "tab_inv": [97, 828],
+            "craft2": {"cols": 2, "filas": 2, "p1": [1647, 285], "pN": [1787, 425]},
+            "salida2": [1717, 740],
+            "craft3": {"cols": 3, "filas": 3, "p1": [1577, 185], "pN": [1857, 464]},
+            "salida3": [1717, 795],
             "hotbar": {"n": 9, "p1": [700, 1000], "pN": [1700, 1000]},
             "hotbar_inv": {"p1": [700, 900], "pN": [1700, 900]},
-            "inv": {"cols": 6, "filas": 5, "p1": [700, 450], "pN": [1700, 750]}
+            "inv": {"cols": 6, "filas": 5, "p1": [700, 450], "pN": [1700, 750]},
+            "suelo": [1200, 760],
+            "largo_ms": 800,
+            "pausa": 0.4,
+            "pausa_salida": 1.0
         }
     }
     try:
@@ -238,6 +251,58 @@ def cerrar_inventario():
     tocar_largo(x, y)
 
 
+def _validar_casilla_zona(zona, n):
+    zonas_validas = ("hotbar_inv", "inv", "craft2", "craft3")
+    if zona not in zonas_validas:
+        raise ValueError(f"Zona no válida para mover ítems: {zona}. Válidas: {zonas_validas}")
+    max_n = 9 if zona in ("hotbar_inv", "craft3") else (4 if zona == "craft2" else 30)
+    if not (1 <= n <= max_n):
+        raise ValueError(f"Número de casilla {n} fuera de rango para zona {zona} (1-{max_n})")
+
+
+def mover_todo(zona_o, n_o, zona_d, n_d, config):
+    _validar_casilla_zona(zona_o, n_o)
+    _validar_casilla_zona(zona_d, n_d)
+    ui_cfg = config.get("ui", {})
+    pausa = ui_cfg.get("pausa", 0.4)
+
+    x_o, y_o = centro_casilla(zona_o, n_o, config)
+    x_d, y_d = centro_casilla(zona_d, n_d, config)
+
+    tocar_pantalla(x_o, y_o)
+    time.sleep(pausa)
+    tocar_pantalla(x_d, y_d)
+    time.sleep(pausa)
+
+
+def mover_mitad(zona_o, n_o, zona_d, n_d, config):
+    _validar_casilla_zona(zona_o, n_o)
+    _validar_casilla_zona(zona_d, n_d)
+    ui_cfg = config.get("ui", {})
+    largo_ms = ui_cfg.get("largo_ms", 800)
+    pausa = ui_cfg.get("pausa", 0.4)
+
+    x_o, y_o = centro_casilla(zona_o, n_o, config)
+    x_d, y_d = centro_casilla(zona_d, n_d, config)
+
+    tocar_largo(x_o, y_o, ms=largo_ms)
+    time.sleep(0.5)
+    tocar_pantalla(x_d, y_d)
+    time.sleep(pausa)
+
+
+def tomar_salida(config, veces=1, zona="salida2"):
+    ui_cfg = config.get("ui", {})
+    pausa_salida = ui_cfg.get("pausa_salida", 1.0)
+    defecto_pos = [1717, 795] if zona == "salida3" else [1717, 740]
+    x, y = ui_cfg.get(zona, defecto_pos)
+    for i in range(1, veces + 1):
+        print(f"Salida {i}/{veces}")
+        tocar_largo(x, y, ms=150)
+        if i < veces:
+            time.sleep(pausa_salida)
+
+
 def centro_casilla(zona, n, config):
     ui_cfg = config.get("ui", {})
     if zona not in ui_cfg:
@@ -258,9 +323,9 @@ def centro_casilla(zona, n, config):
         x = x1 + frac * (xn - x1)
         y = y1 + frac * (yn - y1)
         return int(round(x)), int(round(y))
-    elif zona == "inv":
-        cols = z.get("cols", 6)
-        filas = z.get("filas", 5)
+    elif zona in ("inv", "craft2", "craft3"):
+        cols = z.get("cols", 6 if zona == "inv" else (3 if zona == "craft3" else 2))
+        filas = z.get("filas", 5 if zona == "inv" else (3 if zona == "craft3" else 2))
         col = (n - 1) % cols
         fila = (n - 1) // cols
         frac_col = col / float(cols - 1) if cols > 1 else 0.0
@@ -296,6 +361,19 @@ def calibrar_ui():
 
     ui_cfg["boton_inv"] = pedir_punto("boton_inv", ui_cfg.get("boton_inv", [2150, 80]))
     ui_cfg["cerrar_inv"] = pedir_punto("cerrar_inv", ui_cfg.get("cerrar_inv", [2200, 60]))
+    ui_cfg["salida2"] = pedir_punto("salida2", ui_cfg.get("salida2", [1717, 740]))
+
+    craft2 = ui_cfg.get("craft2", {"cols": 2, "filas": 2, "p1": [1647, 285], "pN": [1787, 425]})
+    craft2["p1"] = pedir_punto("craft2 p1 (casilla 1)", craft2.get("p1", [1647, 285]))
+    craft2["pN"] = pedir_punto("craft2 pN (casilla 4)", craft2.get("pN", [1787, 425]))
+    ui_cfg["craft2"] = craft2
+
+    ui_cfg["salida3"] = pedir_punto("salida3", ui_cfg.get("salida3", [1717, 795]))
+
+    craft3 = ui_cfg.get("craft3", {"cols": 3, "filas": 3, "p1": [1577, 185], "pN": [1857, 464]})
+    craft3["p1"] = pedir_punto("craft3 p1 (casilla 1)", craft3.get("p1", [1577, 185]))
+    craft3["pN"] = pedir_punto("craft3 pN (casilla 9)", craft3.get("pN", [1857, 464]))
+    ui_cfg["craft3"] = craft3
 
     hb = ui_cfg.get("hotbar", {"n": 9, "p1": [700, 1000], "pN": [1700, 1000]})
     res_n = input(f"Ingrese casillas de hotbar (n) [{hb.get('n', 9)}]: ").strip()
@@ -318,6 +396,8 @@ def calibrar_ui():
     inv["pN"] = pedir_punto("inv pN (esquina inferior derecha de la cuadrícula 6x5)", inv.get("pN", [1700, 750]))
     ui_cfg["inv"] = inv
 
+    ui_cfg["suelo"] = pedir_punto("suelo", ui_cfg.get("suelo", [1200, 760]))
+
     guardar_config_minecraft({"ui": ui_cfg})
     print("Calibración UI guardada con éxito.")
 
@@ -331,18 +411,20 @@ def probar_ui(zona):
     print(f"Iniciando prueba UI para '{zona}'. Esperando 10 segundos...")
     time.sleep(10)
 
-    if zona in ("boton_inv", "cerrar_inv"):
+    if zona in ("boton_inv", "cerrar_inv", "salida2", "salida3"):
         x, y = ui_cfg[zona]
         print(f"Tocando {zona}: x={x}, y={y}")
         if zona == "cerrar_inv":
             tocar_largo(x, y)
         else:
             tocar_pantalla(x, y)
-    elif zona in ("hotbar", "hotbar_inv", "inv"):
+    elif zona in ("hotbar", "hotbar_inv", "inv", "craft2", "craft3"):
         if zona == "hotbar":
             total = ui_cfg["hotbar"].get("n", 9)
-        elif zona == "hotbar_inv":
+        elif zona in ("hotbar_inv", "craft3"):
             total = 9
+        elif zona == "craft2":
+            total = 4
         else:
             total = 27
 
@@ -569,7 +651,7 @@ def _consultar_ver_vivo_gemini(api_key, modelo, jpg_b64):
         return json.loads(txt)
 
 
-def _consultar_vision(tipo_prov, api_key, modelo, jpg_b64, prompt, max_tokens=150):
+def _consultar_vision(tipo_prov, api_key, modelo, jpg_b64, prompt, max_tokens=150, timeout=8):
     cuerpo_gen = {
         "contents": [{
             "parts": [
@@ -579,62 +661,134 @@ def _consultar_vision(tipo_prov, api_key, modelo, jpg_b64, prompt, max_tokens=15
         }],
         "generationConfig": {"response_mime_type": "application/json"}
     }
-    if tipo_prov == "gemini":
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent"
-        req = Request(url, data=json.dumps(cuerpo_gen).encode("utf-8"), headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": api_key
-        }, method="POST")
-        with urlopen(req, timeout=8) as resp:
-            data = json.load(resp)
-            txt = data["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(txt)
-    else:
-        cuerpo_groq = {
-            "model": modelo,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{jpg_b64}"}}
-                    ]
+    for intento in range(1, 4):
+        try:
+            if tipo_prov == "gemini":
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent"
+                req = Request(url, data=json.dumps(cuerpo_gen).encode("utf-8"), headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": api_key
+                }, method="POST")
+                try:
+                    with urlopen(req, timeout=timeout) as resp:
+                        data = json.load(resp)
+                        txt = data["candidates"][0]["content"]["parts"][0]["text"]
+                        return json.loads(txt)
+                except HTTPError as e:
+                    if e.code == 429:
+                        cuerpo_err = ""
+                        try:
+                            cuerpo_bytes = e.read()
+                            cuerpo_err = cuerpo_bytes.decode("utf-8", errors="replace")
+                        except Exception:
+                            pass
+                        print(f"HTTP 429 en Gemini ({modelo}): {cuerpo_err[:300]}")
+                        if "PerDay" in cuerpo_err:
+                            print(f"Límite diario alcanzado en Gemini ({modelo}). No se reintentará.")
+                            raise e
+                        match = re.search(r'retryDelay["\s:]+([\d\.]+)s?', cuerpo_err)
+                        if match:
+                            try:
+                                delay_s = float(match.group(1))
+                                if delay_s <= 60.0:
+                                    print(f"Esperando retryDelay de {delay_s}s...")
+                                    time.sleep(delay_s)
+                            except ValueError:
+                                pass
+                    raise e
+            else:
+                cuerpo_groq = {
+                    "model": modelo,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{jpg_b64}"}}
+                            ]
+                        }
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "reasoning_effort": "none",
+                    "temperature": 0.5,
+                    "max_completion_tokens": max_tokens
                 }
-            ],
-            "response_format": {"type": "json_object"},
-            "reasoning_effort": "none",
-            "temperature": 0.5,
-            "max_completion_tokens": max_tokens
-        }
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": "viernes/1.0"
-        }
-        req = Request(url, data=json.dumps(cuerpo_groq).encode("utf-8"), headers=headers, method="POST")
-        with urlopen(req, timeout=8) as resp:
-            data = json.load(resp)
-            txt = data["choices"][0]["message"]["content"]
-            return json.loads(txt)
+                url = "https://api.groq.com/openai/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "viernes/1.0"
+                }
+                req = Request(url, data=json.dumps(cuerpo_groq).encode("utf-8"), headers=headers, method="POST")
+                with urlopen(req, timeout=timeout) as resp:
+                    data = json.load(resp)
+                    txt = data["choices"][0]["message"]["content"]
+                    return json.loads(txt)
+        except URLError as e:
+            if "No address associated with hostname" in str(e) or isinstance(e.reason, socket.gaierror):
+                if intento < 3:
+                    print(f"Error de red ({e.reason}). Reintentando {intento}/3 en 2s...")
+                    time.sleep(2.0)
+                    continue
+            raise e
 
 
-def _consultar_ia(jpg_b64, prompt, max_tokens=150):
-    groq_key = os.getenv("GROQ_API_KEY")
-    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not groq_key and not gemini_key:
+def _consultar_ia_inv(jpg_b64, prompt, max_tokens=900):
+    gemini_key = _obtener_gemini_key()
+    if not gemini_key:
+        print("Error: Se requiere VIERNES_GEMINI_API_KEY/GEMINI_API_KEY para leer el inventario.")
         return None, None
 
     candidatos = []
-    if groq_key:
-        mod_groq = os.getenv("VIERNES_MODELO_GROQ", "qwen/qwen3.8-27b")
-        candidatos.append(("groq", mod_groq))
+    mods_gemini_env = os.getenv("VIERNES_MODELOS_INV", "gemini-3.5-flash,gemini-3.8-flash,gemini-3.5-flash-lite")
+    for m in mods_gemini_env.split(","):
+        m = m.strip()
+        if m and ("gemini", m) not in candidatos:
+            candidatos.append(("gemini", m))
+
+    if not candidatos:
+        print("Error: No hay modelos Gemini especificados para el inventario.")
+        return None, None
+
+    for tipo_prov, modelo in candidatos:
+        for intento in range(1, 3):
+            try:
+                res_ia = _consultar_vision(tipo_prov, gemini_key, modelo, jpg_b64, prompt, max_tokens=max_tokens, timeout=20)
+                return res_ia, f"{tipo_prov}:{modelo}"
+            except Exception as e:
+                print(f"Error intento {intento}/2 con {modelo}: {e}")
+                if "PerDay" in str(e):
+                    break
+                if intento < 2:
+                    time.sleep(3.0)
+
+    return None, None
+
+
+def _consultar_ia(jpg_b64, prompt, max_tokens=150):
+    global _GEMINI_RR_INDEX
+    groq_key = os.getenv("GROQ_API_KEY")
+    gemini_key = _obtener_gemini_key()
+    if not groq_key and not gemini_key:
+        return None, None
+
+    candidatos_gemini = []
     if gemini_key:
         mods_gemini_env = os.getenv("VIERNES_MODELOS_JUEGO") or os.getenv("VIERNES_MODELO_JUEGO") or "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.8-flash"
         for m in mods_gemini_env.split(","):
             m = m.strip()
-            if m and ("gemini", m) not in candidatos:
-                candidatos.append(("gemini", m))
+            if m and ("gemini", m) not in candidatos_gemini:
+                candidatos_gemini.append(("gemini", m))
+
+    if candidatos_gemini:
+        idx = _GEMINI_RR_INDEX % len(candidatos_gemini)
+        _GEMINI_RR_INDEX += 1
+        candidatos_gemini = candidatos_gemini[idx:] + candidatos_gemini[:idx]
+
+    candidatos = list(candidatos_gemini)
+    if groq_key:
+        mod_groq = os.getenv("VIERNES_MODELO_GROQ", "qwen/qwen3.8-27b")
+        candidatos.append(("groq", mod_groq))
 
     ahora = time.time()
     orden_candidatos = [c for c in candidatos if _BLOQUEOS_MODELO.get(f"{c[0]}:{c[1]}", 0) <= ahora]
@@ -684,11 +838,35 @@ def _consultar_ver_vivo_groq(api_key, modelo, jpg_b64):
         return json.loads(txt)
 
 
-def leer_inventario(modo="hotbar"):
+def leer_inventario(modo="hotbar", cerrar=True, debug=False):
     config = cargar_config_minecraft()
     ui_cfg = config.get("ui", {})
 
-    if modo == "todo":
+    if modo == "abierto":
+        jpg_b_chk, jpg_b64_chk = obtener_captura_jpeg_1024()
+        if not jpg_b_chk or not jpg_b64_chk:
+            print("Error: No se pudo obtener la captura para verificar la pantalla de la mesa.")
+            sys.exit(1)
+        prompt_chk = (
+            'Analiza la captura de pantalla de Minecraft e identifica la interfaz abierta.\n'
+            'Responde ÚNICAMENTE en JSON válido con el siguiente formato exacto:\n'
+            '{"pantalla": "<mesa|inventario|juego>"}\n'
+            'Donde pantalla es "mesa" si se ve la cuadrícula de crafteo de 3x3 (mesa de trabajo), '
+            '"inventario" si se ve la cuadrícula de crafteo de 2x2, o "juego" si no hay cuadrícula abierta.'
+        )
+        res_chk, _ = _consultar_ia_inv(jpg_b64_chk, prompt_chk, max_tokens=150)
+        tipo_pantalla = ""
+        if isinstance(res_chk, dict):
+            tipo_pantalla = str(res_chk.get("pantalla", "")).strip().lower()
+
+        if tipo_pantalla != "mesa":
+            print(f"Abortando lectura de inventario abierto: La pantalla detectada es '{tipo_pantalla}', se esperaba 'mesa'.")
+            sys.exit(1)
+
+        x_tab, y_tab = ui_cfg.get("tab_inv", [97, 828])
+        tocar_largo(x_tab, y_tab)
+        time.sleep(1.0)
+    elif modo == "todo":
         x_inv, y_inv = ui_cfg.get("boton_inv", [2150, 80])
         tocar_largo(x_inv, y_inv)
         time.sleep(1.5)
@@ -699,7 +877,7 @@ def leer_inventario(modo="hotbar"):
 
     jpg_bytes, jpg_b64 = obtener_captura_jpeg_1024()
 
-    if modo == "todo":
+    if modo == "todo" and cerrar:
         try:
             x_close, y_close = ui_cfg.get("cerrar_inv", [2200, 60])
             tocar_largo(x_close, y_close)
@@ -708,55 +886,115 @@ def leer_inventario(modo="hotbar"):
 
     if not jpg_bytes or not jpg_b64:
         print("Error: No se pudo obtener la captura de pantalla para el inventario.")
-        return {"hotbar": [], "inv": [], "totales": {}, "hora": time.time()}
+        sys.exit(1)
 
     prompt = (
-        'Analiza la captura de pantalla de Minecraft e identifica todos los ítems visibles en la interfaz.\n'
-        'Explicación de las casillas:\n'
-        '- hotbar: La barra horizontal inferior (casillas 1 a 9, numeradas de izquierda a derecha).\n'
-        '- inv: La cuadrícula principal del inventario de 6 columnas por 5 filas (27 casillas en total, numeradas de 1 a 27 de izquierda a derecha y de arriba a abajo; la última fila solo contiene 3 casillas).\n\n'
-        'Instrucciones:\n'
-        '1. Incluye ÚNICAMENTE las casillas que contengan algún ítem.\n'
-        '2. Para cada ítem, proporciona su ID estándar de Minecraft en inglés (ejemplo: "oak_log", "cobblestone", "iron_pickaxe") y la cantidad (el número pequeño visible en la esquina inferior derecha del cuadro de la casilla, o 1 si no hay número).\n'
-        '3. Responde ÚNICAMENTE en JSON válido con la siguiente estructura exacta y sin texto adicional:\n'
+        'Analiza la captura de pantalla de Minecraft e identifica el CENTRO de cada ítem visible en coordenadas de 0 a 1000 (x de izquierda a derecha, y de arriba a abajo).\n'
+        'Solo incluye casillas que contengan algún ítem.\n'
+        'item debe ser estrictamente uno de: oak_log, oak_planks, stick, crafting_table, oak_leaves, oak_sapling, dirt, cobblestone, coal, torch, chest, furnace, wooden_pickaxe, stone_pickaxe, apple, bread, otro.\n'
+        'cant es el número visible en la esquina inferior derecha de la casilla, o 1 si no hay número.\n'
+        'Responde ÚNICAMENTE en JSON válido con esta estructura exacta y sin texto adicional:\n'
         '{\n'
-        '  "hotbar": [\n'
-        '    {"n": 1, "item": "oak_log", "cant": 5}\n'
-        '  ],\n'
-        '  "inv": []\n'
+        '  "items": [\n'
+        '    {"x": 0, "y": 0, "item": "oak_log", "cant": 5}\n'
+        '  ]\n'
         '}'
     )
 
-    res_ia, modelo_usado = _consultar_ia(jpg_b64, prompt, max_tokens=900)
+    res_ia, modelo_usado = _consultar_ia_inv(jpg_b64, prompt, max_tokens=900)
+
+    centro_x, centro_y = config.get("centro_pantalla", [1200, 540])
+    ancho_px = float(centro_x * 2)
+    alto_px = float(centro_y * 2)
+
+    casillas_eval = []
+    if modo == "hotbar":
+        for n in range(1, 10):
+            cx_px, cy_px = centro_casilla("hotbar", n, config)
+            casillas_eval.append(("hotbar", n, (cx_px / ancho_px) * 1000.0, (cy_px / alto_px) * 1000.0))
+    else:
+        for n in range(1, 10):
+            cx_px, cy_px = centro_casilla("hotbar_inv", n, config)
+            casillas_eval.append(("hotbar", n, (cx_px / ancho_px) * 1000.0, (cy_px / alto_px) * 1000.0))
+        for n in range(1, 28):
+            cx_px, cy_px = centro_casilla("inv", n, config)
+            casillas_eval.append(("inv", n, (cx_px / ancho_px) * 1000.0, (cy_px / alto_px) * 1000.0))
+
+    if debug:
+        print("--- DEBUG IA JSON RAW ---")
+        print(json.dumps(res_ia, indent=2, ensure_ascii=False))
+
+    items_devueltos_cant = 0
+    items_validos_parseados = 0
+
+    items_parsed = []
+    if isinstance(res_ia, dict):
+        items_raw = res_ia.get("items")
+        if isinstance(items_raw, list):
+            items_devueltos_cant = len(items_raw)
+            for elem in items_raw:
+                if isinstance(elem, dict) and "x" in elem and "y" in elem and "item" in elem:
+                    try:
+                        ix = float(elem["x"])
+                        iy = float(elem["y"])
+                        item_nombre = str(elem["item"]).strip()
+                        cant_val = int(elem.get("cant", 1))
+                        items_parsed.append({"x": ix, "y": iy, "item": item_nombre, "cant": cant_val})
+                    except (ValueError, TypeError):
+                        pass
+
+    if items_parsed:
+        todas_menor_igual_1 = all(elem["x"] <= 1.0 and elem["y"] <= 1.0 for elem in items_parsed)
+        if todas_menor_igual_1:
+            for elem in items_parsed:
+                elem["x"] *= 1000.0
+                elem["y"] *= 1000.0
+
+    asignaciones = {}
+    for elem in items_parsed:
+        ix = elem["x"]
+        iy = elem["y"]
+        item_nombre = elem["item"]
+        cant_val = elem["cant"]
+
+        mejo_casilla = None
+        min_dist = float("inf")
+        for zona_c, n_c, cx_1000, cy_1000 in casillas_eval:
+            dist = math.hypot(ix - cx_1000, iy - cy_1000)
+            if dist < min_dist:
+                min_dist = dist
+                mejo_casilla = (zona_c, n_c)
+
+        descartado = (not mejo_casilla) or (min_dist > 100.0)
+
+        if debug:
+            casilla_str = f"{mejo_casilla[0]}:{mejo_casilla[1]}" if mejo_casilla else "ninguna"
+            estado_str = "DESCARTADO" if descartado else "ACEPTADO"
+            print(f"[DEBUG Item] ({ix:.1f}, {iy:.1f}) {item_nombre} x{cant_val} -> Casilla más cercana: {casilla_str}, dist: {min_dist:.1f}px [{estado_str}]")
+
+        if not descartado:
+            items_validos_parseados += 1
+            clave = mejo_casilla
+            if clave not in asignaciones or min_dist < asignaciones[clave][1]:
+                asignaciones[clave] = ({"n": mejo_casilla[1], "item": item_nombre, "cant": cant_val}, min_dist)
+
+    if items_devueltos_cant == 0 or len(asignaciones) == 0:
+        print(f"AVISO: La IA devolvió {items_devueltos_cant} ítems (asignaciones aceptadas: {len(asignaciones)}).")
+        print("JSON crudo devuelto por la IA:")
+        print(json.dumps(res_ia, indent=2, ensure_ascii=False))
+        if res_ia is None:
+            sys.exit(1)
 
     hotbar_list = []
     inv_list = []
-    if isinstance(res_ia, dict):
-        hb_raw = res_ia.get("hotbar")
-        if isinstance(hb_raw, list):
-            for elem in hb_raw:
-                if isinstance(elem, dict) and "n" in elem and "item" in elem:
-                    try:
-                        hotbar_list.append({
-                            "n": int(elem["n"]),
-                            "item": str(elem["item"]).strip(),
-                            "cant": int(elem.get("cant", 1))
-                        })
-                    except (ValueError, TypeError):
-                        pass
+    for (zona_c, n_c), (item_info, _) in asignaciones.items():
+        if zona_c == "hotbar":
+            hotbar_list.append(item_info)
+        else:
+            inv_list.append(item_info)
 
-        inv_raw = res_ia.get("inv")
-        if isinstance(inv_raw, list):
-            for elem in inv_raw:
-                if isinstance(elem, dict) and "n" in elem and "item" in elem:
-                    try:
-                        inv_list.append({
-                            "n": int(elem["n"]),
-                            "item": str(elem["item"]).strip(),
-                            "cant": int(elem.get("cant", 1))
-                        })
-                    except (ValueError, TypeError):
-                        pass
+    hotbar_list.sort(key=lambda x: x["n"])
+    inv_list.sort(key=lambda x: x["n"])
 
     totales = {}
     for item_info in hotbar_list + inv_list:
@@ -801,9 +1039,157 @@ def leer_inventario(modo="hotbar"):
     return res_dict
 
 
+def buscar_item(inv, clave):
+    for elem in inv.get("hotbar", []):
+        if clave in elem.get("item", ""):
+            return ("hotbar_inv", elem["n"], elem.get("cant", 1))
+    for elem in inv.get("inv", []):
+        if clave in elem.get("item", ""):
+            return ("inv", elem["n"], elem.get("cant", 1))
+    return None
+
+
+def _parse_pos_arg(arg_str):
+    parts = arg_str.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"Formato inválido de posición: {arg_str}. Debe ser ZONA:N (ej. inv:19)")
+    return parts[0].strip(), int(parts[1].strip())
+
+
+def craftear(receta, veces, config, arg_tablones=None, arg_palos=None):
+    if receta == "pico":
+        x_tab, y_tab = config.get("ui", {}).get("tab_inv", [97, 828])
+        tocar_largo(x_tab, y_tab)
+        time.sleep(1.0)
+
+        cant_inicial = 0
+        if arg_tablones and arg_palos:
+            z_tab, n_tab = _parse_pos_arg(arg_tablones)
+            z_pal, n_pal = _parse_pos_arg(arg_palos)
+        else:
+            print("Leyendo inventario pre-crafteo (modo abierto)...")
+            inv_inicial = leer_inventario("abierto")
+            cant_inicial = sum(cnt for itm, cnt in inv_inicial.get("totales", {}).items() if "pickaxe" in itm)
+
+            res_tab = buscar_item(inv_inicial, "plank")
+            if not res_tab or res_tab[2] < 4:
+                print("Abortando crafteo: Falta material ('plank', se requieren al menos 4).")
+                sys.exit(1)
+            z_tab, n_tab, _ = res_tab
+
+            res_pal = buscar_item(inv_inicial, "stick")
+            if not res_pal or res_pal[2] < 2:
+                print("Abortando crafteo: Falta material ('stick', se requieren al menos 2).")
+                sys.exit(1)
+            z_pal, n_pal, _ = res_pal
+
+        mover_todo(z_tab, n_tab, "craft3", 1, config)
+        mover_mitad("craft3", 1, "craft3", 2, config)
+        mover_mitad("craft3", 1, "craft3", 3, config)
+        mover_todo(z_pal, n_pal, "craft3", 5, config)
+        mover_mitad("craft3", 5, "craft3", 8, config)
+        tomar_salida(config, 1, "salida3")
+
+        cerrar_inventario()
+        time.sleep(1.0)
+
+        print("Leyendo inventario post-crafteo...")
+        inv_final = leer_inventario("todo")
+        cant_final = sum(cnt for itm, cnt in inv_final.get("totales", {}).items() if "pickaxe" in itm)
+
+        if arg_tablones and arg_palos:
+            print(f"Crafteo de pico finalizado. Total después: {cant_final}")
+        else:
+            print(f"Crafteo de pico finalizado. Total antes: {cant_inicial} | Total después: {cant_final}")
+        return
+
+    print("Leyendo inventario pre-crafteo...")
+    inv_inicial = leer_inventario("todo", cerrar=False)
+    
+    cant_inicial = sum(cnt for itm, cnt in inv_inicial.get("totales", {}).items() if receta_prod_clave(receta) in itm)
+
+    if receta == "tablones":
+        res_mat = buscar_item(inv_inicial, "log")
+        if not res_mat:
+            cerrar_inventario()
+            print("Abortando crafteo: Falta material ('log').")
+            sys.exit(1)
+        z_o, n_o, cant = res_mat
+        mover_todo(z_o, n_o, "craft2", 1, config)
+        tomar_salida(config, veces=veces)
+    elif receta == "palos":
+        res_mat = buscar_item(inv_inicial, "plank")
+        if not res_mat or res_mat[2] < 2:
+            cerrar_inventario()
+            print("Abortando crafteo: Falta material ('plank', se requieren al menos 2).")
+            sys.exit(1)
+        z_o, n_o, cant = res_mat
+        mover_todo(z_o, n_o, "craft2", 1, config)
+        mover_mitad("craft2", 1, "craft2", 3, config)
+        tomar_salida(config, veces=veces)
+    elif receta == "mesa":
+        res_mat = buscar_item(inv_inicial, "plank")
+        if not res_mat or res_mat[2] < 4:
+            cerrar_inventario()
+            print("Abortando crafteo: Falta material ('plank', se requieren al menos 4).")
+            sys.exit(1)
+        z_o, n_o, cant = res_mat
+        mover_todo(z_o, n_o, "craft2", 1, config)
+        mover_mitad("craft2", 1, "craft2", 2, config)
+        mover_mitad("craft2", 1, "craft2", 3, config)
+        mover_mitad("craft2", 2, "craft2", 4, config)
+        tomar_salida(config, veces=veces)
+    else:
+        cerrar_inventario()
+        print(f"Receta desconocida: {receta}")
+        sys.exit(1)
+
+    cerrar_inventario()
+    time.sleep(1.0)
+
+    print("Leyendo inventario post-crafteo...")
+    inv_final = leer_inventario("todo")
+    cant_final = sum(cnt for itm, cnt in inv_final.get("totales", {}).items() if receta_prod_clave(receta) in itm)
+
+    print(f"Crafteo de {receta} finalizado. Total antes: {cant_inicial} | Total después: {cant_final}")
+
+
+def poner_mesa(config, casilla=None):
+    ui_cfg = config.get("ui", {})
+    x_suelo, y_suelo = ui_cfg.get("suelo", [1200, 760])
+
+    if casilla is not None:
+        c_num = int(casilla)
+    else:
+        inv = leer_inventario("hotbar")
+        res = buscar_item(inv, "crafting_table")
+        if not res:
+            print("Abortando poner_mesa: No se encontró 'crafting_table' en la hotbar.")
+            sys.exit(1)
+        _, c_num, _ = res
+
+    x_c, y_c = centro_casilla("hotbar", c_num, config)
+    tocar_pantalla(x_c, y_c)
+    time.sleep(0.5)
+    tocar_pantalla(x_suelo, y_suelo)
+    time.sleep(1.0)
+    tocar_pantalla(x_suelo, y_suelo)
+    time.sleep(1.5)
+
+
+def receta_prod_clave(receta):
+    if receta == "tablones":
+        return "plank"
+    elif receta == "palos":
+        return "stick"
+    elif receta == "mesa":
+        return "crafting_table"
+    return ""
+
+
 def modo_ver_vivo():
     groq_key = os.getenv("GROQ_API_KEY")
-    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    gemini_key = _obtener_gemini_key()
     if not groq_key and not gemini_key:
         sys.exit("Error: Se requiere GROQ_API_KEY o GEMINI_API_KEY para ver_vivo.")
 
@@ -902,7 +1288,7 @@ def modo_ver_vivo():
 
 def consultar_siguiente_jugada(jpg_b64, objetivo, ultimas_acciones):
     groq_key = os.getenv("GROQ_API_KEY")
-    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    gemini_key = _obtener_gemini_key()
 
     candidatos = []
     if groq_key and _groq_permitido():
@@ -957,7 +1343,7 @@ def consultar_siguiente_jugada(jpg_b64, objetivo, ultimas_acciones):
 
 def modo_juego(objetivo, ciclos=60):
     groq_key = os.getenv("GROQ_API_KEY")
-    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    gemini_key = _obtener_gemini_key()
     if not groq_key and not gemini_key:
         sys.exit("Error: Se requiere GROQ_API_KEY o GEMINI_API_KEY para el modo juego.")
 
@@ -1064,8 +1450,9 @@ def modo_juego(objetivo, ciclos=60):
 
 
 def modo_talar(max_pasos=40, max_golpes=3):
+    global _GEMINI_RR_INDEX
     groq_key = os.getenv("GROQ_API_KEY")
-    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    gemini_key = _obtener_gemini_key()
     if not groq_key and not gemini_key:
         sys.exit("Error: Se requiere GROQ_API_KEY o GEMINI_API_KEY para talar.")
 
@@ -1075,16 +1462,13 @@ def modo_talar(max_pasos=40, max_golpes=3):
         except OSError:
             pass
 
-    candidatos = []
-    if groq_key:
-        mod_groq = os.getenv("VIERNES_MODELO_GROQ", "qwen/qwen3.8-27b")
-        candidatos.append(("groq", mod_groq))
+    candidatos_gemini = []
     if gemini_key:
         mods_gemini_env = os.getenv("VIERNES_MODELOS_JUEGO") or os.getenv("VIERNES_MODELO_JUEGO") or "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.8-flash"
         for m in mods_gemini_env.split(","):
             m = m.strip()
-            if m and ("gemini", m) not in candidatos:
-                candidatos.append(("gemini", m))
+            if m and ("gemini", m) not in candidatos_gemini:
+                candidatos_gemini.append(("gemini", m))
 
     prompt = (
         'Analiza la imagen de Minecraft. Devuelve UNICAMENTE un JSON valido con este formato exacto:\n'
@@ -1109,11 +1493,29 @@ def modo_talar(max_pasos=40, max_golpes=3):
     print("Esperando 10 segundos antes de iniciar el modo talar...")
     time.sleep(10)
 
+    troncos_inicio = None
+    try:
+        inv_inicio = leer_inventario("hotbar")
+        troncos_inicio = sum(cnt for itm, cnt in inv_inicio.get("totales", {}).items() if "log" in itm)
+    except Exception as e:
+        print(f"Aviso: No se pudo leer inventario al inicio de modo_talar ({e}).")
+
     golpes = 0
     pasos = 0
     fallos_seguidos = 0
     peligro_seguido = 0
     giro_acumulado_sin_arbol = 0
+
+    rumbo = 0.0
+    arbol_rumbo = None
+    intento_rumbo_arbol = False
+    ultima_accion_solo_avanzar = False
+    ultimo_xc = None
+
+    def hacer_giro(deg):
+        nonlocal rumbo
+        girar_grados(deg, config)
+        rumbo += deg
 
     while pasos < max_pasos and golpes < max_golpes:
         if os.path.exists(ARCHIVO_PARAR_JUEGO):
@@ -1134,26 +1536,52 @@ def modo_talar(max_pasos=40, max_golpes=3):
             time.sleep(1.0)
             continue
 
+        candidatos_gemini_paso = list(candidatos_gemini)
+        if candidatos_gemini_paso:
+            idx = _GEMINI_RR_INDEX % len(candidatos_gemini_paso)
+            _GEMINI_RR_INDEX += 1
+            candidatos_gemini_paso = candidatos_gemini_paso[idx:] + candidatos_gemini_paso[:idx]
+
+        candidatos = list(candidatos_gemini_paso)
+        if groq_key:
+            mod_groq = os.getenv("VIERNES_MODELO_GROQ", "qwen/qwen3.8-27b")
+            candidatos.append(("groq", mod_groq))
+
         ahora = time.time()
         orden_candidatos = [c for c in candidatos if _BLOQUEOS_MODELO.get(f"{c[0]}:{c[1]}", 0) <= ahora]
         if not orden_candidatos:
             orden_candidatos = list(candidatos)
 
-        res_ia = None
-        t_mod = 0.0
-        prov_usado = None
-        mod_usado = None
-        for tipo_prov, modelo in orden_candidatos:
-            clave_m = f"{tipo_prov}:{modelo}"
-            t_m0 = time.time()
+        def consultar_ia_talar(b64_img):
+            for tipo_prov, modelo in orden_candidatos:
+                clave_m = f"{tipo_prov}:{modelo}"
+                t_m0 = time.time()
+                try:
+                    r_ia = _consultar_vision(tipo_prov, groq_key if tipo_prov == "groq" else gemini_key, modelo, b64_img, prompt)
+                    return r_ia, time.time() - t_m0, tipo_prov, modelo
+                except Exception:
+                    _BLOQUEOS_MODELO[clave_m] = time.time() + 20.0
+            return None, 0.0, None, None
+
+        def validar_tronco(t_dict):
+            if not isinstance(t_dict, dict):
+                return None
             try:
-                res_ia = _consultar_vision(tipo_prov, groq_key if tipo_prov == "groq" else gemini_key, modelo, jpg_b64, prompt)
-                t_mod = time.time() - t_m0
-                prov_usado = tipo_prov
-                mod_usado = modelo
-                break
-            except Exception as e:
-                _BLOQUEOS_MODELO[clave_m] = time.time() + 20.0
+                x1_v = float(t_dict.get("x1", 0))
+                x2_v = float(t_dict.get("x2", 0))
+                y1_v = float(t_dict.get("y1", 0))
+                y2_v = float(t_dict.get("y2", 0))
+                w_v = abs(x2_v - x1_v)
+                h_v = abs(y2_v - y1_v)
+                if w_v < 8 or h_v < 30:
+                    return None
+                if (x1_v <= 5 or x2_v >= 995) and w_v < 80:
+                    return None
+                return t_dict
+            except Exception:
+                return None
+
+        res_ia, t_mod, prov_usado, mod_usado = consultar_ia_talar(jpg_b64)
 
         if res_ia is None:
             fallos_seguidos += 1
@@ -1166,14 +1594,85 @@ def modo_talar(max_pasos=40, max_golpes=3):
 
         fallos_seguidos = 0
         veo = res_ia.get("veo", "").strip() or "Sin descripción"
-        tronco = res_ia.get("tronco")
-        if not isinstance(tronco, dict):
-            tronco = None
+        tronco_raw = res_ia.get("tronco")
+        tronco = validar_tronco(tronco_raw)
         peligro = str(res_ia.get("peligro", "no")).strip().lower()
+
+        reconsultas_realizadas = 0
+
+        if reconsultas_realizadas < 1 and tronco_raw is not None and tronco is None:
+            print(f"Paso {pasos}: Caja de tronco inválida {json.dumps(tronco_raw)}. Reconsultando (1/1 max)...")
+            reconsultas_realizadas += 1
+            _bytes_re, b64_re = obtener_captura_jpeg_1024()
+            if b64_re:
+                r_re, t_re, p_re, m_re = consultar_ia_talar(b64_re)
+                if r_re:
+                    res_ia, t_mod, prov_usado, mod_usado = r_re, t_re, p_re, m_re
+                    veo = res_ia.get("veo", "").strip() or "Sin descripción"
+                    tronco_raw = res_ia.get("tronco")
+                    tronco = validar_tronco(tronco_raw)
+                    peligro = str(res_ia.get("peligro", "no")).strip().lower()
+
+        if reconsultas_realizadas < 1 and tronco and ultima_accion_solo_avanzar and ultimo_xc is not None:
+            x1_tmp = float(tronco.get("x1", 0))
+            x2_tmp = float(tronco.get("x2", 0))
+            xc_tmp = (x1_tmp + x2_tmp) / 2.0
+            if abs(xc_tmp - ultimo_xc) > 200:
+                print(f"Paso {pasos}: xc varió > 200 tras avanzar ({ultimo_xc:.1f} vs {xc_tmp:.1f}). Reconsultando (1/1 max)...")
+                reconsultas_realizadas += 1
+                _bytes_re, b64_re = obtener_captura_jpeg_1024()
+                if b64_re:
+                    r_re, t_re, p_re, m_re = consultar_ia_talar(b64_re)
+                    if r_re:
+                        res_ia, t_mod, prov_usado, mod_usado = r_re, t_re, p_re, m_re
+                        veo = res_ia.get("veo", "").strip() or "Sin descripción"
+                        tronco_raw = res_ia.get("tronco")
+                        tronco = validar_tronco(tronco_raw)
+                        peligro = str(res_ia.get("peligro", "no")).strip().lower()
+
+        if reconsultas_realizadas < 1 and peligro != "no":
+            print(f"Paso {pasos}: Posible peligro ('{peligro}'). Verificando con segunda lectura (1/1 max)...")
+            reconsultas_realizadas += 1
+            _bytes_re, b64_re = obtener_captura_jpeg_1024()
+            if b64_re:
+                r_re, t_re, p_re, m_re = consultar_ia_talar(b64_re)
+                if r_re:
+                    peligro_confirmado = str(r_re.get("peligro", "no")).strip().lower()
+                    if peligro_confirmado == "no":
+                        peligro = "no"
+                    else:
+                        peligro = peligro_confirmado
+                        res_ia, t_mod, prov_usado, mod_usado = r_re, t_re, p_re, m_re
+                        veo = res_ia.get("veo", "").strip() or "Sin descripción"
+                        tronco_raw = res_ia.get("tronco")
+                        tronco = validar_tronco(tronco_raw)
+
+        if reconsultas_realizadas < 1 and tronco and arbol_rumbo is not None:
+            x1_tmp = float(tronco.get("x1", 0))
+            x2_tmp = float(tronco.get("x2", 0))
+            xc_tmp = (x1_tmp + x2_tmp) / 2.0
+            ang_tmp = (xc_tmp - 500.0) / 1000.0 * fov_horizontal
+            rumbo_propuesto = rumbo + ang_tmp
+            delta_rumbo = (rumbo_propuesto - arbol_rumbo) % 360.0
+            if delta_rumbo > 180.0:
+                delta_rumbo -= 360.0
+            if abs(delta_rumbo) > 45.0:
+                print(f"Paso {pasos}: Rumbo propuesto ({rumbo_propuesto:.1f}°) difiere >45° del recordado ({arbol_rumbo:.1f}°). Reconsultando (1/1 max)...")
+                reconsultas_realizadas += 1
+                _bytes_re, b64_re = obtener_captura_jpeg_1024()
+                if b64_re:
+                    r_re, t_re, p_re, m_re = consultar_ia_talar(b64_re)
+                    if r_re:
+                        res_ia, t_mod, prov_usado, mod_usado = r_re, t_re, p_re, m_re
+                        veo = res_ia.get("veo", "").strip() or "Sin descripción"
+                        tronco_raw = res_ia.get("tronco")
+                        tronco = validar_tronco(tronco_raw)
+                        peligro = str(res_ia.get("peligro", "no")).strip().lower()
 
         h = 0.0
         d = 0.0
         ang = 0.0
+        xc = None
         if tronco:
             x1 = float(tronco.get("x1", 0))
             x2 = float(tronco.get("x2", 0))
@@ -1185,43 +1684,68 @@ def modo_talar(max_pasos=40, max_golpes=3):
             xc = (x1 + x2) / 2.0
             ang = (xc - 500.0) / 1000.0 * fov_horizontal
             ang = max(-60.0, min(60.0, ang))
+            arbol_rumbo = rumbo + ang
+            intento_rumbo_arbol = False
 
         accion_str = ""
         t_act0 = time.time()
+        es_solo_avanzar = False
 
         if peligro != "no":
             peligro_seguido += 1
             if peligro_seguido >= 2:
-                girar_grados(90, config)
+                hacer_giro(90)
                 ejecutar_accion_juego("retroceder", 1.0, config)
                 accion_str = f"Peligro ({peligro}) repetido -> Girar 90° y retroceder 1s"
             else:
-                girar_grados(90, config)
+                hacer_giro(90)
                 accion_str = f"Peligro ({peligro}) -> Girar 90°"
         else:
             peligro_seguido = 0
             if tronco is None:
-                girar_grados(60, config)
-                giro_acumulado_sin_arbol += 60
-                if giro_acumulado_sin_arbol >= 360:
-                    avanzar_bloques(10, config)
-                    giro_acumulado_sin_arbol = 0
-                    accion_str = "Sin árbol (vuelta completa) -> Girar 60° y avanzar 10 bloques"
+                if arbol_rumbo is not None and not intento_rumbo_arbol:
+                    delta = (arbol_rumbo - rumbo) % 360.0
+                    if delta > 180.0:
+                        delta -= 360.0
+                    delta = max(-90.0, min(90.0, delta))
+                    hacer_giro(delta)
+                    intento_rumbo_arbol = True
+                    accion_str = f"Sin árbol -> Orientar a rumbo recordado ({delta:.1f}°)"
                 else:
-                    accion_str = "Sin árbol -> Girar 60°"
+                    if intento_rumbo_arbol:
+                        arbol_rumbo = None
+                        intento_rumbo_arbol = False
+                    hacer_giro(60)
+                    giro_acumulado_sin_arbol += 60
+                    if giro_acumulado_sin_arbol >= 360:
+                        avanzar_bloques(10, config)
+                        giro_acumulado_sin_arbol = 0
+                        accion_str = "Sin árbol (vuelta completa) -> Girar 60° y avanzar 10 bloques"
+                    else:
+                        accion_str = "Sin árbol -> Girar 60°"
             else:
                 giro_acumulado_sin_arbol = 0
                 if h >= golpe_altura or d <= 3.5:
-                    px_x = int((xc / 1000.0) * ancho_px)
+                    if abs(xc - 500.0) > 100:
+                        hacer_giro(ang)
+                        px_x = int(centro_x)
+                    else:
+                        px_x = int((xc / 1000.0) * ancho_px)
                     px_y = int(((y1 + 0.75 * (y2 - y1)) / 1000.0) * alto_px)
+                    px_x = max(700, min(1900, px_x))
+                    px_y = max(150, min(900, px_y))
                     ejecutar_accion_juego("picar", picar_s, config, {"x": px_x, "y": px_y})
                     golpes += 1
-                    accion_str = f"Golpe {golpes}/{max_golpes}! Picar directo en ({px_x}, {px_y}) por {picar_s}s"
+                    dist_recoger = min(4.0, d + 0.5)
+                    avanzar_bloques(dist_recoger, config)
+                    accion_str = f"Golpe {golpes}/{max_golpes}! Picar directo en ({px_x}, {px_y}) por {picar_s}s + Recoger ({dist_recoger:.2f} blq)"
                 else:
                     acciones_paso = []
                     if abs(xc - 500.0) > 60:
-                        girar_grados(ang, config)
+                        hacer_giro(ang)
                         acciones_paso.append(f"Girar {ang:.1f}°")
+                    else:
+                        es_solo_avanzar = True
 
                     av = d - 2.5
                     if d > 6:
@@ -1232,14 +1756,29 @@ def modo_talar(max_pasos=40, max_golpes=3):
                     acciones_paso.append(f"Avanzar {av:.2f} blq")
                     accion_str = " + ".join(acciones_paso)
 
+        ultima_accion_solo_avanzar = es_solo_avanzar
+        ultimo_xc = xc
+
         t_act = time.time() - t_act0
         t_tot = time.time() - t0
 
         caja_str = json.dumps(tronco) if tronco else "null"
         prov_str = f"{prov_usado}:{mod_usado}" if prov_usado and mod_usado else "desconocido"
-        print(f"Paso {pasos}/{max_pasos} | Mod: {prov_str} | Veo: {veo} | BBox: {caja_str} | h: {h:.2f} d: {d:.2f} ang: {ang:.1f}° | Acción: {accion_str} | Tiempos: Cap={int(t_cap*1000)}ms IA={int(t_mod*1000)}ms Act={int(t_act*1000)}ms Tot={int(t_tot*1000)}ms")
+        arbol_rumbo_str = f"{arbol_rumbo:.1f}°" if arbol_rumbo is not None else "None"
+        print(f"Paso {pasos}/{max_pasos} | Mod: {prov_str} | Veo: {veo} | BBox: {caja_str} | h: {h:.2f} d: {d:.2f} ang: {ang:.1f}° | Rumbo: {rumbo:.1f}° (Árbol: {arbol_rumbo_str}) | Acción: {accion_str} | Tiempos: Cap={int(t_cap*1000)}ms IA={int(t_mod*1000)}ms Act={int(t_act*1000)}ms Tot={int(t_tot*1000)}ms")
 
     print(f"Modo talar finalizado. Golpes dados: {golpes}/{max_golpes}")
+
+    try:
+        inv_fin = leer_inventario("hotbar")
+        troncos_fin = sum(cnt for itm, cnt in inv_fin.get("totales", {}).items() if "log" in itm)
+        if troncos_inicio is not None:
+            ganados = troncos_fin - troncos_inicio
+            print(f"Troncos ganados: +{ganados}")
+        else:
+            print(f"Troncos ganados: +0 (sin lectura inicial)")
+    except Exception as e:
+        print(f"Aviso: No se pudo leer inventario al final de modo_talar ({e}).")
 
 
 def lanzar_app(paquete):
@@ -1298,7 +1837,7 @@ def main():
     p = sub.add_parser("calibrar")
     p.add_argument("modo", choices=["giro", "avance", "picar", "ui"])
     p = sub.add_parser("ui_probar")
-    p.add_argument("zona", choices=["boton_inv", "cerrar_inv", "hotbar", "hotbar_inv", "inv"])
+    p.add_argument("zona", choices=["boton_inv", "cerrar_inv", "salida2", "craft2", "salida3", "craft3", "hotbar", "hotbar_inv", "inv"])
     p = sub.add_parser("probar")
     p.add_argument("accion", choices=["giro", "avance"])
     p.add_argument("valor", type=float)
@@ -1309,6 +1848,22 @@ def main():
     p.add_argument("trazos_json")
     p = sub.add_parser("inventario")
     p.add_argument("modo", nargs="?", choices=["hotbar", "todo"], default="hotbar")
+    p.add_argument("--debug", action="store_true")
+    p = sub.add_parser("mover")
+    p.add_argument("modo", choices=["todo", "mitad"])
+    p.add_argument("zona_o", choices=["hotbar_inv", "inv", "craft2", "craft3"])
+    p.add_argument("n_o", type=int)
+    p.add_argument("zona_d", choices=["hotbar_inv", "inv", "craft2", "craft3"])
+    p.add_argument("n_d", type=int)
+    p = sub.add_parser("salida")
+    p.add_argument("--veces", type=int, default=1)
+    p = sub.add_parser("craftear")
+    p.add_argument("receta", choices=["tablones", "palos", "mesa", "pico"])
+    p.add_argument("--veces", type=int, default=1)
+    p.add_argument("--tablones", default=None)
+    p.add_argument("--palos", default=None)
+    p = sub.add_parser("poner_mesa")
+    p.add_argument("--casilla", type=int, default=None)
     a = ap.parse_args()
 
     if a.cmd in (None, "ayuda"):
@@ -1418,7 +1973,32 @@ def main():
             print("ERROR: JSON inválido para multi:", e)
             sys.exit(2)
     elif a.cmd == "inventario":
-        leer_inventario(a.modo)
+        print("Esperando 10 segundos antes de leer el inventario...")
+        time.sleep(10)
+        leer_inventario(a.modo, debug=a.debug)
+    elif a.cmd == "mover":
+        config = cargar_config_minecraft()
+        print("Esperando 10 segundos antes de ejecutar mover...")
+        time.sleep(10)
+        if a.modo == "todo":
+            mover_todo(a.zona_o, a.n_o, a.zona_d, a.n_d, config)
+        else:
+            mover_mitad(a.zona_o, a.n_o, a.zona_d, a.n_d, config)
+    elif a.cmd == "salida":
+        config = cargar_config_minecraft()
+        print("Esperando 10 segundos antes de ejecutar salida...")
+        time.sleep(10)
+        tomar_salida(config, veces=a.veces)
+    elif a.cmd == "craftear":
+        config = cargar_config_minecraft()
+        print(f"Esperando 10 segundos antes de craftear '{a.receta}'...")
+        time.sleep(10)
+        craftear(a.receta, a.veces, config, arg_tablones=a.tablones, arg_palos=a.palos)
+    elif a.cmd == "poner_mesa":
+        config = cargar_config_minecraft()
+        print("Esperando 10 segundos antes de poner mesa...")
+        time.sleep(10)
+        poner_mesa(config, casilla=a.casilla)
 
 
 if __name__ == "__main__":
