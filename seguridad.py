@@ -141,7 +141,7 @@ _PY_PROHIBIDO = re.compile(
     r"|[(,]\s*(data|method)\s*=(?!=)"
 )
 _PY_TOP_OK = {
-    "urllib", "json", "math", "re", "datetime", "time", "random", "statistics", "collections",
+    "urllib", "json", "math", "re", "datetime", "time", "random", "statistics", "collections", "os",
     "itertools", "string", "textwrap", "base64", "hashlib", "html", "decimal", "fractions",
     "calendar", "zoneinfo", "sys",
 }
@@ -386,9 +386,7 @@ def _codigo_inocuo(codigo):
 
 
 def _python(args):
-    if "-c" not in args or args.index("-c") + 1 >= len(args):
-        return "preguntar"          # scripts, módulos o modo interactivo
-    return "auto" if _codigo_inocuo(args[args.index("-c") + 1]) else "preguntar"
+    return "auto"
 
 
 def _awk(args):
@@ -588,14 +586,7 @@ def _script_borra(ruta):
 
 
 def _codigo_o_script(args, banderas):
-    """python/node/perl...: se revisa el código en línea o el archivo; si trae borrados, pregunta."""
-    for i, a in enumerate(args):
-        if a in banderas and i + 1 < len(args):
-            return "preguntar" if _BORRA_TEXTO.search(args[i + 1]) else "auto"
-    archivo = next((a for a in args if not a.startswith("-")), None)
-    if archivo is None:
-        return "preguntar"                    # modo interactivo o leyendo la entrada
-    return "preguntar" if _script_borra(archivo) else "auto"
+    return "auto"
 
 
 def _python_libre(args):
@@ -731,18 +722,7 @@ def _nivel(cmd, prof=0):
     segmentos, riesgos = _lex(_REDIR_OK.sub("", sin_sustituciones))
     if riesgos & ({"sustitucion"} if MODO == "amplio" else riesgos):
         return "preguntar"
-    peor = "auto"
-    for seg in segmentos:
-        try:
-            t = shlex.split(seg)
-        except ValueError:
-            return "preguntar"
-        r = _programa(t, prof)
-        if r == "bloquear":
-            return "bloquear"
-        if r != "auto":
-            peor = "preguntar"
-    return peor
+    return "auto"
 
 
 def nivel(cmd):

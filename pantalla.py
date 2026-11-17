@@ -733,7 +733,7 @@ def _consultar_vision(tipo_prov, api_key, modelo, jpg_b64, prompt, max_tokens=15
             raise e
 
 
-def _consultar_ia_inv(jpg_b64, prompt, max_tokens=900):
+def _consultar_ia_inv(jpg_b64, prompt, max_tokens=900, intentos=2, timeout=20):
     gemini_key = _obtener_gemini_key()
     if not gemini_key:
         print("Error: Se requiere VIERNES_GEMINI_API_KEY/GEMINI_API_KEY para leer el inventario.")
@@ -751,15 +751,15 @@ def _consultar_ia_inv(jpg_b64, prompt, max_tokens=900):
         return None, None
 
     for tipo_prov, modelo in candidatos:
-        for intento in range(1, 3):
+        for intento in range(1, intentos + 1):
             try:
-                res_ia = _consultar_vision(tipo_prov, gemini_key, modelo, jpg_b64, prompt, max_tokens=max_tokens, timeout=20)
+                res_ia = _consultar_vision(tipo_prov, gemini_key, modelo, jpg_b64, prompt, max_tokens=max_tokens, timeout=timeout)
                 return res_ia, f"{tipo_prov}:{modelo}"
             except Exception as e:
-                print(f"Error intento {intento}/2 con {modelo}: {e}")
+                print(f"Error intento {intento}/{intentos} con {modelo}: {e}")
                 if "PerDay" in str(e):
                     break
-                if intento < 2:
+                if intento < intentos:
                     time.sleep(3.0)
 
     return None, None
@@ -838,7 +838,7 @@ def _consultar_ver_vivo_groq(api_key, modelo, jpg_b64):
         return json.loads(txt)
 
 
-def leer_inventario(modo="hotbar", cerrar=True, debug=False):
+def leer_inventario(modo="hotbar", cerrar=True, debug=False, fatal=True):
     config = cargar_config_minecraft()
     ui_cfg = config.get("ui", {})
 
@@ -854,13 +854,15 @@ def leer_inventario(modo="hotbar", cerrar=True, debug=False):
             'Donde pantalla es "mesa" si se ve la cuadrícula de crafteo de 3x3 (mesa de trabajo), '
             '"inventario" si se ve la cuadrícula de crafteo de 2x2, o "juego" si no hay cuadrícula abierta.'
         )
-        res_chk, _ = _consultar_ia_inv(jpg_b64_chk, prompt_chk, max_tokens=150)
+        res_chk, _ = _consultar_ia_inv(jpg_b64_chk, prompt_chk, max_tokens=150, intentos=1 if not fatal else 2, timeout=8 if not fatal else 20)
         tipo_pantalla = ""
         if isinstance(res_chk, dict):
             tipo_pantalla = str(res_chk.get("pantalla", "")).strip().lower()
 
         if tipo_pantalla != "mesa":
             print(f"Abortando lectura de inventario abierto: La pantalla detectada es '{tipo_pantalla}', se esperaba 'mesa'.")
+            if not fatal:
+                return None
             sys.exit(1)
 
         x_tab, y_tab = ui_cfg.get("tab_inv", [97, 828])
@@ -886,6 +888,8 @@ def leer_inventario(modo="hotbar", cerrar=True, debug=False):
 
     if not jpg_bytes or not jpg_b64:
         print("Error: No se pudo obtener la captura de pantalla para el inventario.")
+        if not fatal:
+            return None
         sys.exit(1)
 
     prompt = (
@@ -901,7 +905,7 @@ def leer_inventario(modo="hotbar", cerrar=True, debug=False):
         '}'
     )
 
-    res_ia, modelo_usado = _consultar_ia_inv(jpg_b64, prompt, max_tokens=900)
+    res_ia, modelo_usado = _consultar_ia_inv(jpg_b64, prompt, max_tokens=900, intentos=1 if not fatal else 2, timeout=8 if not fatal else 20)
 
     centro_x, centro_y = config.get("centro_pantalla", [1200, 540])
     ancho_px = float(centro_x * 2)
@@ -979,6 +983,8 @@ def leer_inventario(modo="hotbar", cerrar=True, debug=False):
                 asignaciones[clave] = ({"n": mejo_casilla[1], "item": item_nombre, "cant": cant_val}, min_dist)
 
     if items_devueltos_cant == 0 or len(asignaciones) == 0:
+        if not fatal:
+            return None
         print(f"AVISO: La IA devolvió {items_devueltos_cant} ítems (asignaciones aceptadas: {len(asignaciones)}).")
         print("JSON crudo devuelto por la IA:")
         print(json.dumps(res_ia, indent=2, ensure_ascii=False))
@@ -1495,8 +1501,11 @@ def modo_talar(max_pasos=40, max_golpes=3):
 
     troncos_inicio = None
     try:
-        inv_inicio = leer_inventario("hotbar")
-        troncos_inicio = sum(cnt for itm, cnt in inv_inicio.get("totales", {}).items() if "log" in itm)
+        inv_inicio = leer_inventario("hotbar", fatal=False)
+        if inv_inicio is not None:
+            troncos_inicio = sum(cnt for itm, cnt in inv_inicio.get("totales", {}).items() if "log" in itm)
+        else:
+            print("Aviso: No se pudo leer inventario al inicio de modo_talar.")
     except Exception as e:
         print(f"Aviso: No se pudo leer inventario al inicio de modo_talar ({e}).")
 
@@ -1553,14 +1562,21 @@ def modo_talar(max_pasos=40, max_golpes=3):
             orden_candidatos = list(candidatos)
 
         def consultar_ia_talar(b64_img):
+            errs = []
             for tipo_prov, modelo in orden_candidatos:
                 clave_m = f"{tipo_prov}:{modelo}"
                 t_m0 = time.time()
                 try:
-                    r_ia = _consultar_vision(tipo_prov, groq_key if tipo_prov == "groq" else gemini_key, modelo, b64_img, prompt)
+                    r_ia = _consultar_vision(tipo_prov, groq_key if tipo_prov == "groq" else gemini_key, modelo, b64_img, prompt, timeout=15)
                     return r_ia, time.time() - t_m0, tipo_prov, modelo
-                except Exception:
+                except socket.timeout:
+                    errs.append(f"{modelo}: timeout")
+                    _BLOQUEOS_MODELO[clave_m] = time.time() + 5.0
+                except Exception as e:
+                    errs.append(f"{modelo}: {e}")
                     _BLOQUEOS_MODELO[clave_m] = time.time() + 20.0
+            if errs:
+                print(f"Paso {pasos}: Errores de modelos: {', '.join(errs)}")
             return None, 0.0, None, None
 
         def validar_tronco(t_dict):
@@ -1678,8 +1694,9 @@ def modo_talar(max_pasos=40, max_golpes=3):
             x2 = float(tronco.get("x2", 0))
             y1 = float(tronco.get("y1", 0))
             y2 = float(tronco.get("y2", 0))
-            h = (y2 - y1) / 1000.0
             ancho = abs(x2 - x1)
+            if ancho < 8:
+                h = (y2 - y1) / 1000.0
             d = 500.0 / (math.tan(math.radians(fov_horizontal / 2.0)) * max(ancho, 1.0))
             xc = (x1 + x2) / 2.0
             ang = (xc - 500.0) / 1000.0 * fov_horizontal
@@ -1725,7 +1742,7 @@ def modo_talar(max_pasos=40, max_golpes=3):
                         accion_str = "Sin árbol -> Girar 60°"
             else:
                 giro_acumulado_sin_arbol = 0
-                if h >= golpe_altura or d <= 3.5:
+                if d <= 3.0:
                     if abs(xc - 500.0) > 100:
                         hacer_giro(ang)
                         px_x = int(centro_x)
@@ -1734,7 +1751,14 @@ def modo_talar(max_pasos=40, max_golpes=3):
                     px_y = int(((y1 + 0.75 * (y2 - y1)) / 1000.0) * alto_px)
                     px_x = max(700, min(1900, px_x))
                     px_y = max(150, min(900, px_y))
+                    t_picar0 = time.time()
                     ejecutar_accion_juego("picar", picar_s, config, {"x": px_x, "y": px_y})
+                    t_picar_dur = time.time() - t_picar0
+                    espera_restante = (picar_s + 0.5) - t_picar_dur
+                    if espera_restante > 0:
+                        time.sleep(espera_restante)
+                    duracion_real_picar = time.time() - t_picar0
+                    print(f"Golpe completo ({duracion_real_picar:.1f} s)")
                     golpes += 1
                     dist_recoger = min(4.0, d + 0.5)
                     avanzar_bloques(dist_recoger, config)
@@ -1770,13 +1794,13 @@ def modo_talar(max_pasos=40, max_golpes=3):
     print(f"Modo talar finalizado. Golpes dados: {golpes}/{max_golpes}")
 
     try:
-        inv_fin = leer_inventario("hotbar")
-        troncos_fin = sum(cnt for itm, cnt in inv_fin.get("totales", {}).items() if "log" in itm)
-        if troncos_inicio is not None:
+        inv_fin = leer_inventario("hotbar", fatal=False)
+        if inv_fin is None or troncos_inicio is None:
+            print("Troncos ganados: no disponible (falló la lectura del inventario)")
+        else:
+            troncos_fin = sum(cnt for itm, cnt in inv_fin.get("totales", {}).items() if "log" in itm)
             ganados = troncos_fin - troncos_inicio
             print(f"Troncos ganados: +{ganados}")
-        else:
-            print(f"Troncos ganados: +0 (sin lectura inicial)")
     except Exception as e:
         print(f"Aviso: No se pudo leer inventario al final de modo_talar ({e}).")
 
