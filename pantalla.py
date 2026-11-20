@@ -733,14 +733,14 @@ def _consultar_vision(tipo_prov, api_key, modelo, jpg_b64, prompt, max_tokens=15
             raise e
 
 
-def _consultar_ia_inv(jpg_b64, prompt, max_tokens=900, intentos=2, timeout=20):
+def _consultar_ia_inv(jpg_b64, prompt, max_tokens=900, intentos=2, timeout=15):
     gemini_key = _obtener_gemini_key()
     if not gemini_key:
         print("Error: Se requiere VIERNES_GEMINI_API_KEY/GEMINI_API_KEY para leer el inventario.")
         return None, None
 
     candidatos = []
-    mods_gemini_env = os.getenv("VIERNES_MODELOS_INV", "gemini-3.5-flash,gemini-3.8-flash,gemini-3.5-flash-lite")
+    mods_gemini_env = os.getenv("VIERNES_MODELOS_INV", "gemini-3.5-flash-lite,gemini-3.1-flash-lite")
     for m in mods_gemini_env.split(","):
         m = m.strip()
         if m and ("gemini", m) not in candidatos:
@@ -760,7 +760,7 @@ def _consultar_ia_inv(jpg_b64, prompt, max_tokens=900, intentos=2, timeout=20):
                 if "PerDay" in str(e):
                     break
                 if intento < intentos:
-                    time.sleep(3.0)
+                    time.sleep(2.0)
 
     return None, None
 
@@ -1043,6 +1043,69 @@ def leer_inventario(modo="hotbar", cerrar=True, debug=False, fatal=True):
         pass
 
     return res_dict
+
+
+def leer_coordenadas():
+    gemini_key = _obtener_gemini_key()
+    if not gemini_key:
+        print("Error: Se requiere VIERNES_GEMINI_API_KEY/GEMINI_API_KEY para leer coordenadas.")
+        return None, None
+
+    jpg_bytes, jpg_b64 = obtener_captura_jpeg_1024()
+    if not jpg_bytes or not jpg_b64:
+        print("Error: No se pudo obtener la captura de pantalla para coordenadas.")
+        return None, None
+
+    mods_gemini_env = os.getenv("VIERNES_MODELOS_JUEGO") or os.getenv("VIERNES_MODELO_JUEGO") or "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.8-flash"
+    candidatos = []
+    for m in mods_gemini_env.split(","):
+        m = m.strip()
+        if m and ("gemini", m) not in candidatos:
+            candidatos.append(("gemini", m))
+
+    if not candidatos:
+        print("Error: No hay modelos Gemini especificados para leer coordenadas.")
+        return None, None
+
+    prompt = (
+        'Analiza la esquina superior izquierda de la captura de pantalla de Minecraft donde dice "Posición: X, Y, Z" o "Coordenadas: X, Y, Z".\n'
+        'Extrae los valores numéricos enteros de las coordenadas X, Y, Z (pueden ser negativos).\n'
+        'Responde ÚNICAMENTE en JSON válido con este formato exacto y sin texto adicional:\n'
+        '{\n'
+        '  "x": 0,\n'
+        '  "y": 0,\n'
+        '  "z": 0\n'
+        '}\n'
+        'Si el texto de posición/coordenadas no se ve claramente en la pantalla, asigna null a los tres valores:\n'
+        '{\n'
+        '  "x": null,\n'
+        '  "y": null,\n'
+        '  "z": null\n'
+        '}'
+    )
+
+    for tipo_prov, modelo in candidatos:
+        for intento in range(1, 3):
+            try:
+                res_ia = _consultar_vision(tipo_prov, gemini_key, modelo, jpg_b64, prompt, max_tokens=150, timeout=10)
+                if isinstance(res_ia, dict):
+                    x = res_ia.get("x")
+                    y = res_ia.get("y")
+                    z = res_ia.get("z")
+                    if x is not None and y is not None and z is not None:
+                        try:
+                            return (int(x), int(y), int(z)), f"{tipo_prov}:{modelo}"
+                        except (ValueError, TypeError):
+                            pass
+                    else:
+                        return None, f"{tipo_prov}:{modelo}"
+            except Exception as e:
+                if "PerDay" in str(e):
+                    break
+                if intento < 2:
+                    time.sleep(1.0)
+
+    return None, None
 
 
 def buscar_item(inv, clave):
@@ -1707,15 +1770,22 @@ def modo_talar(max_pasos=40, max_golpes=3):
         accion_str = ""
         t_act0 = time.time()
         es_solo_avanzar = False
+        desglose_act = []
 
         if peligro != "no":
             peligro_seguido += 1
             if peligro_seguido >= 2:
+                t_sub0 = time.time()
                 hacer_giro(90)
+                desglose_act.append(f"giro={int((time.time()-t_sub0)*1000)}ms")
+                t_sub0 = time.time()
                 ejecutar_accion_juego("retroceder", 1.0, config)
+                desglose_act.append(f"retroceder={int((time.time()-t_sub0)*1000)}ms")
                 accion_str = f"Peligro ({peligro}) repetido -> Girar 90° y retroceder 1s"
             else:
+                t_sub0 = time.time()
                 hacer_giro(90)
+                desglose_act.append(f"giro={int((time.time()-t_sub0)*1000)}ms")
                 accion_str = f"Peligro ({peligro}) -> Girar 90°"
         else:
             peligro_seguido = 0
@@ -1725,17 +1795,23 @@ def modo_talar(max_pasos=40, max_golpes=3):
                     if delta > 180.0:
                         delta -= 360.0
                     delta = max(-90.0, min(90.0, delta))
+                    t_sub0 = time.time()
                     hacer_giro(delta)
+                    desglose_act.append(f"giro={int((time.time()-t_sub0)*1000)}ms")
                     intento_rumbo_arbol = True
                     accion_str = f"Sin árbol -> Orientar a rumbo recordado ({delta:.1f}°)"
                 else:
                     if intento_rumbo_arbol:
                         arbol_rumbo = None
                         intento_rumbo_arbol = False
+                    t_sub0 = time.time()
                     hacer_giro(60)
+                    desglose_act.append(f"giro={int((time.time()-t_sub0)*1000)}ms")
                     giro_acumulado_sin_arbol += 60
                     if giro_acumulado_sin_arbol >= 360:
+                        t_sub0 = time.time()
                         avanzar_bloques(10, config)
+                        desglose_act.append(f"avanzar={int((time.time()-t_sub0)*1000)}ms")
                         giro_acumulado_sin_arbol = 0
                         accion_str = "Sin árbol (vuelta completa) -> Girar 60° y avanzar 10 bloques"
                     else:
@@ -1744,7 +1820,9 @@ def modo_talar(max_pasos=40, max_golpes=3):
                 giro_acumulado_sin_arbol = 0
                 if d <= 3.0:
                     if abs(xc - 500.0) > 100:
+                        t_sub0 = time.time()
                         hacer_giro(ang)
+                        desglose_act.append(f"giro={int((time.time()-t_sub0)*1000)}ms")
                         px_x = int(centro_x)
                     else:
                         px_x = int((xc / 1000.0) * ancho_px)
@@ -1754,19 +1832,26 @@ def modo_talar(max_pasos=40, max_golpes=3):
                     t_picar0 = time.time()
                     ejecutar_accion_juego("picar", picar_s, config, {"x": px_x, "y": px_y})
                     t_picar_dur = time.time() - t_picar0
+                    desglose_act.append(f"golpe={int(t_picar_dur*1000)}ms")
                     espera_restante = (picar_s + 0.5) - t_picar_dur
                     if espera_restante > 0:
+                        t_esp0 = time.time()
                         time.sleep(espera_restante)
+                        desglose_act.append(f"espera={int((time.time()-t_esp0)*1000)}ms")
                     duracion_real_picar = time.time() - t_picar0
                     print(f"Golpe completo ({duracion_real_picar:.1f} s)")
                     golpes += 1
                     dist_recoger = min(4.0, d + 0.5)
+                    t_sub0 = time.time()
                     avanzar_bloques(dist_recoger, config)
+                    desglose_act.append(f"recoger={int((time.time()-t_sub0)*1000)}ms")
                     accion_str = f"Golpe {golpes}/{max_golpes}! Picar directo en ({px_x}, {px_y}) por {picar_s}s + Recoger ({dist_recoger:.2f} blq)"
                 else:
                     acciones_paso = []
                     if abs(xc - 500.0) > 60:
+                        t_sub0 = time.time()
                         hacer_giro(ang)
+                        desglose_act.append(f"giro={int((time.time()-t_sub0)*1000)}ms")
                         acciones_paso.append(f"Girar {ang:.1f}°")
                     else:
                         es_solo_avanzar = True
@@ -1776,7 +1861,9 @@ def modo_talar(max_pasos=40, max_golpes=3):
                         av *= 0.8
                     av = max(0.5, min(8.0, av))
 
+                    t_sub0 = time.time()
                     avanzar_bloques(av, config)
+                    desglose_act.append(f"avanzar={int((time.time()-t_sub0)*1000)}ms")
                     acciones_paso.append(f"Avanzar {av:.2f} blq")
                     accion_str = " + ".join(acciones_paso)
 
@@ -1786,10 +1873,18 @@ def modo_talar(max_pasos=40, max_golpes=3):
         t_act = time.time() - t_act0
         t_tot = time.time() - t0
 
+        ms_cap = int(t_cap * 1000)
+        ms_ia = int(t_mod * 1000)
+        ms_act = int(t_act * 1000)
+        ms_tot = int(t_tot * 1000)
+        ms_otros = ms_tot - ms_cap - ms_ia - ms_act
+
+        desglose_str = f" ({', '.join(desglose_act)})" if desglose_act else ""
+
         caja_str = json.dumps(tronco) if tronco else "null"
         prov_str = f"{prov_usado}:{mod_usado}" if prov_usado and mod_usado else "desconocido"
         arbol_rumbo_str = f"{arbol_rumbo:.1f}°" if arbol_rumbo is not None else "None"
-        print(f"Paso {pasos}/{max_pasos} | Mod: {prov_str} | Veo: {veo} | BBox: {caja_str} | h: {h:.2f} d: {d:.2f} ang: {ang:.1f}° | Rumbo: {rumbo:.1f}° (Árbol: {arbol_rumbo_str}) | Acción: {accion_str} | Tiempos: Cap={int(t_cap*1000)}ms IA={int(t_mod*1000)}ms Act={int(t_act*1000)}ms Tot={int(t_tot*1000)}ms")
+        print(f"Paso {pasos}/{max_pasos} | Mod: {prov_str} | Veo: {veo} | BBox: {caja_str} | h: {h:.2f} d: {d:.2f} ang: {ang:.1f}° | Rumbo: {rumbo:.1f}° (Árbol: {arbol_rumbo_str}) | Acción: {accion_str} | Tiempos: Cap={ms_cap}ms IA={ms_ia}ms Act={ms_act}ms{desglose_str} Otros={ms_otros}ms Tot={ms_tot}ms")
 
     print(f"Modo talar finalizado. Golpes dados: {golpes}/{max_golpes}")
 
@@ -1888,6 +1983,7 @@ def main():
     p.add_argument("--palos", default=None)
     p = sub.add_parser("poner_mesa")
     p.add_argument("--casilla", type=int, default=None)
+    sub.add_parser("coordenadas")
     a = ap.parse_args()
 
     if a.cmd in (None, "ayuda"):
@@ -2023,6 +2119,22 @@ def main():
         print("Esperando 10 segundos antes de poner mesa...")
         time.sleep(10)
         poner_mesa(config, casilla=a.casilla)
+    elif a.cmd == "coordenadas":
+        print("Esperando 10 segundos antes de leer coordenadas...")
+        time.sleep(10)
+        lecturas = []
+        for i in range(1, 4):
+            coords, mod_usado = leer_coordenadas()
+            lecturas.append((coords, mod_usado))
+            if coords:
+                x, y, z = coords
+                print(f"Lectura {i}: X={x} Y={y} Z={z} (modelo: {mod_usado or 'desconocido'})")
+            else:
+                print(f"Lectura {i}: X=None Y=None Z=None (modelo: {mod_usado or 'desconocido'})")
+
+        coords_list = [c for c, _ in lecturas]
+        if len(set(coords_list)) > 1:
+            print("AVISO: Las 3 lecturas no coinciden entre sí.")
 
 
 if __name__ == "__main__":
